@@ -30,8 +30,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-const auth = new google.auth.GoogleAuth({
-  keyFile: 'google-service-account.json',
+const auth = new google.auth.GoogleAuth({keyFile: './google-service-account.json',
   scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
 });
 
