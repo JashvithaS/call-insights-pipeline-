@@ -1,10 +1,9 @@
 // ============================================================
-//  IACG CallIQ — Standalone Backend v8
-//  Changes over v7:
-//   - Superfone value normalization (OUTBOUND→Outgoing, ANSWER→Answered, etc.)
-//   - UUID-based dedup for Google Sheet polling (no more SF Number collisions)
-//   - Short-call short-circuit (skip Whisper for <10s rings, saves credits)
-//   - Cleaner poll logging — one summary line per poll cycle
+//  IACG CallIQ — Standalone Backend v8.1
+//  Changes over v8:
+//   - New /repush-zoho-all endpoint for bulk re-pushing done calls
+//     (use this once after removing the ZOHO_TEST_PHONES whitelist
+//      to send historical calls to Zoho)
 // ============================================================
 
 const express = require('express');
@@ -30,22 +29,44 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-const credentials = JSON.parse(
-  process.env.GOOGLE_SERVICE_ACCOUNT_JSON
-);
 
-const auth = new google.auth.GoogleAuth({
-  credentials,
+const fs = require('fs');
+
+function loadGoogleCredentials() {
+  // Cloud: full JSON pasted as an env var
+  if (process.env.GOOGLE_SERVICE_ACCOUNT && process.env.GOOGLE_SERVICE_ACCOUNT.trim()) {
+    try {
+      return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+    } catch (e) {
+      console.error('❌ GOOGLE_SERVICE_ACCOUNT env var is not valid JSON:', e.message);
+      return null;
+    }
+  }
+  // Local: file in project root
+  if (fs.existsSync('./google-service-account.json')) {
+    try {
+      return JSON.parse(fs.readFileSync('./google-service-account.json', 'utf8'));
+    } catch (e) {
+      console.error('❌ google-service-account.json is not valid JSON:', e.message);
+      return null;
+    }
+  }
+  console.warn('⚠ No Google credentials found — sheet polling disabled');
+  return null;
+}
+
+const googleCredentials = loadGoogleCredentials();
+
+const auth = googleCredentials ? new google.auth.GoogleAuth({
+  credentials: googleCredentials,
   scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-});
+}) : null;
 
-const sheets = google.sheets({
-  version: 'v4',
-  auth,
-});
+const sheets = auth ? google.sheets({ version: 'v4', auth }) : null;
 
 const SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const SHEET_NAME = process.env.GOOGLE_SHEET_NAME || 'Sheet1';
+
 
 // Normalize Superfone enum values to what our pipeline expects
 const SUPERFONE_CALL_TYPE = { OUTBOUND: 'Outgoing', INBOUND: 'Incoming' };
@@ -690,9 +711,69 @@ app.post('/repush-zoho/:id', async (req, res) => {
 });
 
 // ============================================================
+//  POST /repush-zoho-all — bulk re-push every "done" row to Zoho
+//  Use this once after removing the ZOHO_TEST_PHONES whitelist
+//  to send historical calls that were skipped during testing.
+// ============================================================
+app.post('/repush-zoho-all', async (req, res) => {
+  try {
+    const { data: calls, error } = await supabase
+      .from('calls').select('*')
+      .eq('status', 'done')
+      .not('summary', 'is', null)
+      .order('updated_at', { ascending: false })
+      .limit(500);
+
+    if (error) return res.status(500).json({ error: error.message });
+    if (!calls || calls.length === 0) {
+      return res.json({ queued: 0, message: 'No done calls with summaries to repush' });
+    }
+
+    res.status(202).json({
+      queued: calls.length,
+      message: `Bulk repush started for ${calls.length} calls — watch server logs for progress`
+    });
+
+    console.log(`\n🔁 Bulk repush — ${calls.length} done calls`);
+    let pushed = 0, failed = 0, skipped = 0;
+
+    for (const call of calls) {
+      if (!call.phone_number) { skipped++; continue; }
+      const ai = {
+        program: call.program,
+        course: call.course,
+        college_interested: call.college_interested,
+        walkin_interested: call.walkin_interested,
+        walkin_date: call.walkin_date,
+        follow_up_required: call.follow_up_required,
+        call_status: call.call_status,
+        sentiment: call.sentiment,
+        quality_category: call.quality_category,
+        score: call.score,
+        interest_level: call.interest_level,
+        summary: call.summary
+      };
+      try {
+        await pushToZoho(call, ai, call.mp3_url, call.transcript);
+        pushed++;
+      } catch (e) {
+        failed++;
+        console.error(`  ✗ ${call.sf_number || call.id} repush failed:`, e.response?.data || e.message);
+      }
+    }
+    console.log(`✅ Bulk repush done — ${pushed} pushed, ${failed} failed, ${skipped} skipped (no phone)\n`);
+
+  } catch (err) {
+    console.error('Bulk repush error:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
 //  pollGoogleSheet — fetch sheet, dedup by UUID, queue new rows
 // ============================================================
 async function pollGoogleSheet() {
+  if (!sheets || !SHEET_ID) return;
   try {
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID, range: SHEET_NAME,
@@ -782,10 +863,14 @@ async function pollGoogleSheet() {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`✅ CallIQ standalone server v8 running on http://localhost:${PORT}`);
+  console.log(`✅ CallIQ standalone server v8.1 running on http://localhost:${PORT}`);
   console.log(`   Whisper-1 + GPT-4o with IACG-specific analysis`);
   console.log(`   Zoho CRM push: ${ZOHO_ENABLED ? 'ON' : 'OFF'}  |  DRY_RUN: ${ZOHO_DRY_RUN ? 'ON (nothing sent)' : 'OFF (live)'}`);
   console.log(`   Zoho test phones: ${ZOHO_TEST_PHONES.length ? ZOHO_TEST_PHONES.join(', ') : '(none — all phones allowed)'}`);
-  console.log(`   Google Sheet polling every 30s\n`);
-  setInterval(async () => { await pollGoogleSheet(); }, 30000);
+  if (sheets && SHEET_ID) {
+    console.log(`   Google Sheet polling every 30s\n`);
+    setInterval(async () => { await pollGoogleSheet(); }, 30000);
+  } else {
+    console.log(`   ⚠ Google Sheet polling disabled (missing credentials or GOOGLE_SHEET_ID)\n`);
+  }
 });
