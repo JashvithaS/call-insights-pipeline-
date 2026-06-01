@@ -1,3 +1,4 @@
 node_modules
 .env
 google-service-account.json
+git commit -m "Remove .env from git tracking"
