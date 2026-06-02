@@ -31,9 +31,18 @@ const supabase = createClient(
 
 
 const fs = require('fs');
-
 function loadGoogleCredentials() {
-  // Cloud: full JSON pasted as an env var
+  // Cloud preferred: base64-encoded JSON in env var
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_B64) {
+    try {
+      const decoded = Buffer.from(process.env.GOOGLE_SERVICE_ACCOUNT_B64, 'base64').toString('utf8');
+      return JSON.parse(decoded);
+    } catch (e) {
+      console.error('❌ GOOGLE_SERVICE_ACCOUNT_B64 is not valid base64 JSON:', e.message);
+      return null;
+    }
+  }
+  // Cloud alternative: raw JSON in env var (may break on some platforms)
   if (process.env.GOOGLE_SERVICE_ACCOUNT && process.env.GOOGLE_SERVICE_ACCOUNT.trim()) {
     try {
       return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
@@ -54,8 +63,6 @@ function loadGoogleCredentials() {
   console.warn('⚠ No Google credentials found — sheet polling disabled');
   return null;
 }
-
-const googleCredentials = loadGoogleCredentials();
 
 const auth = googleCredentials ? new google.auth.GoogleAuth({
   credentials: googleCredentials,
@@ -111,12 +118,12 @@ const ZOHO_FIELD_MAP = {
   Customer:          (c, ai) => c.lead_name || null,
   call_date:         (c, ai) => c.call_date || null,
   Interested_or_not: (c, ai) => (ai.interest_level && ai.interest_level !== 'None') ? 'Yes' : 'No',
-  Call_Status:       (c, ai) => ai.call_status || null,
+  Call_Status:       (c, ai) => c.call_status || null,
   Start_Time:        (c, ai) => c.start_time || null,
   SF_Number:         (c, ai) => c.sf_number || null,
   Recording:         (c, ai, mp3) => mp3 || null,
   Full_conversation: (c, ai, mp3, tr) => tr ? tr.slice(0, 32000) : null,
-  summary:           (c, ai) => ai.summary ? ai.summary.slice(0, 1990) : null,
+  Summary:           (c, ai) => ai.summary ? ai.summary.slice(0, 1990) : null,
   AI_Call:           (c, ai) => ai.quality_category || null,
   AI_Tags:           (c, ai) => {
     const t = [];
@@ -772,12 +779,20 @@ app.post('/repush-zoho-all', async (req, res) => {
 // ============================================================
 //  pollGoogleSheet — fetch sheet, dedup by UUID, queue new rows
 // ============================================================
+let pollInProgress = false;
+
 async function pollGoogleSheet() {
   if (!sheets || !SHEET_ID) return;
+  if (pollInProgress) {
+    console.log('⏭ Skipping poll — previous still running');
+    return;
+  }
+  pollInProgress = true;
   try {
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID, range: SHEET_NAME,
     });
+    
     const rows = res.data.values;
     if (!rows || rows.length < 2) {
       console.log('📄 Sheet check — no rows');
@@ -799,15 +814,16 @@ async function pollGoogleSheet() {
         console.log(`⏭ ${row['Customer'] || '(unnamed)'} — recording URL has no parseable call ID`);
         continue;
       }
+      // Only skip if Duration is EXPLICITLY a small number.
+// Empty Duration is unreliable — Superfone sometimes leaves it blank for real calls.
+const durationStr = (row['Duration'] || '').toString().trim();
+const durSec = parseInt(durationStr) || 0;
+if (durationStr && durSec > 0 && durSec < 15) {
+  tooShort++;
+  continue;
+}
 
-      // Skip calls that clearly had no conversation (saves Whisper credits)
-      const durationStr = (row['Duration'] || '').toString().trim();
-      const durSec = parseInt(durationStr) || 0;
-      if (!durationStr || durSec < 10) {
-        tooShort++;
-        continue;
-      }
-
+    
       // Dedup by the REAL unique call ID, not by the company-phone SF Number
       const { data: existing } = await supabase
         .from('calls').select('id')
@@ -858,6 +874,8 @@ async function pollGoogleSheet() {
     console.log(`📄 Sheet check — ${newCount} new, ${existingCount} already done, ${noRecording} no-recording, ${tooShort} too-short`);
   } catch (err) {
     console.error('Google Sheet Error:', err.message);
+    } finally {
+    pollInProgress = false;
   }
 }
 
