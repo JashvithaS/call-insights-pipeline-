@@ -34,14 +34,16 @@ const fs = require('fs');
 function loadGoogleCredentials() {
   // Cloud preferred: base64-encoded JSON in env var
   if (process.env.GOOGLE_SERVICE_ACCOUNT_B64) {
-    try {
-      const decoded = Buffer.from(process.env.GOOGLE_SERVICE_ACCOUNT_B64, 'base64').toString('utf8');
-      return JSON.parse(decoded);
-    } catch (e) {
-      console.error('❌ GOOGLE_SERVICE_ACCOUNT_B64 is not valid base64 JSON:', e.message);
-      return null;
-    }
+  try {
+    // Strip any whitespace/newlines that may have been added when pasting into env var UI
+    const cleanB64 = process.env.GOOGLE_SERVICE_ACCOUNT_B64.replace(/\s/g, '');
+    const decoded = Buffer.from(cleanB64, 'base64').toString('utf8');
+    return JSON.parse(decoded);
+  } catch (e) {
+    console.error('❌ GOOGLE_SERVICE_ACCOUNT_B64 is not valid base64 JSON:', e.message);
+    return null;
   }
+}
   // Cloud alternative: raw JSON in env var (may break on some platforms)
   if (process.env.GOOGLE_SERVICE_ACCOUNT && process.env.GOOGLE_SERVICE_ACCOUNT.trim()) {
     try {
