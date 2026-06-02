@@ -63,7 +63,7 @@ function loadGoogleCredentials() {
   console.warn('⚠ No Google credentials found — sheet polling disabled');
   return null;
 }
-
+const googleCredentials = loadGoogleCredentials();
 const auth = googleCredentials ? new google.auth.GoogleAuth({
   credentials: googleCredentials,
   scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
