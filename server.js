@@ -302,7 +302,6 @@ async function processOneCall(call, batchId) {
     const form = new FormData();
     form.append('file', audioBuffer, { filename: fileName, contentType: 'audio/mpeg' });
     form.append('model', 'whisper-1');
-    form.append('language', 'en');
     form.append('temperature', '0');
     form.append('prompt', `This is an admissions call from IACG / IAG Multimedia / IACG College in Hyderabad, India. The customer name is ${call.lead_name}. The agent is an IACG counselor (often a female name like Roja). Conversation discusses Intermediate programs (MPC, MEC, CGA, PCA, Humanities, Arts, Manga/Anime), campus visits at Jubilee Hills or Dilsukhnagar, fees, scholarships, walk-ins.`);
     form.append('response_format', 'verbose_json');
